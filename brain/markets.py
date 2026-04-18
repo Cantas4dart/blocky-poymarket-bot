@@ -43,6 +43,10 @@ class MarketClient:
             "Washington": (38.9072, -77.0369, True),
             "Los Angeles": (34.0522, -118.2437, True),
             "Miami": (25.7617, -80.1918, True),
+            "Phoenix": (33.4484, -112.0740, True),
+            "Dallas": (32.7767, -96.7970, True),
+            "Houston": (29.7604, -95.3698, True),
+            "Denver": (39.7392, -104.9903, True),
             
             # International Markets
             "London": (51.5074, -0.1278, False), # Heathrow (LHR)
