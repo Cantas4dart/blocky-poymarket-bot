@@ -60,10 +60,26 @@ export class TradeExecutor {
         console.log(`[EXEC] New Signal for ${user.tg_id}: ${signal.question}`);
 
         try {
-          // 2. Size Calculation
+          // 2. Size Calculation & Auto-Approval Check
           const balanceData: any = await poly.getBalance();
-          const balance = parseFloat(balanceData.balance);
+          const balance = parseFloat(balanceData.balance) / 1000000;
           
+          // allowances is an object
+          const standardEx = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E";
+          const allowanceVal = balanceData.allowances ? (balanceData as any).allowances[standardEx] : "0";
+          const allowance = parseFloat(allowanceVal || "0") / 1000000;
+          
+          console.log(`[EXEC] User ${user.tg_id} - Balance: ${balance.toFixed(2)}, Allowance: ${allowance.toFixed(2)}`);
+
+          // Auto-Approve if balance exists but allowance is missing
+          if (balance > 0.1 && allowance < 1.0) {
+            console.log(`[EXEC] Auto-approving USDC allowance (Master Approval) for user ${user.tg_id}...`);
+            await poly.approveUSDC();
+            console.log(`[EXEC] Master Auto-approval transactions sent.`);
+            // Continue with the loop, next run will pick up the new allowance
+            continue;
+          }
+
           // Size = min(Balance * Risk%, MaxTradeAmount) / Price
           let targetUSD = balance * (user.risk_percent / 100);
           if (targetUSD > user.max_trade_amount) targetUSD = user.max_trade_amount;

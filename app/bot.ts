@@ -36,6 +36,7 @@ bot.command("help", (ctx) => {
 Available Commands:
 /start - Start the bot
 /import - Import Private Key
+/approve - Set trading allowance (One-time)
 /start_trading - Enable auto-trading
 /stop_trading - Disable auto-trading
 /status - Check bot status
@@ -100,11 +101,57 @@ bot.command("balance", async (ctx) => {
       secret: user.api_secret,
       passphrase: user.api_passphrase
     }, user.private_key);
-    const balance = await poly.getBalance();
-    ctx.reply(`💰 USDC Balance: ${balance.balance}\nAllowance: ${balance.allowance}`);
+    const balanceData: any = await poly.getBalance();
+    console.log(`[BOT] Raw Balance Data for ${ctx.from.id}:`, balanceData);
+    
+    if (!balanceData || balanceData.balance === undefined) {
+      throw new Error("Invalid balance data received from Polymarket.");
+    }
+
+    // USDC has 6 decimals
+    const balanceNum = parseFloat(balanceData.balance);
+    
+    // allowances is an object, we check the standard exchange contract
+    // we use (balanceData as any) to bypass the incorrect SDK type definition
+    const standardEx = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E";
+    const allowanceVal = balanceData.allowances ? (balanceData as any).allowances[standardEx] : "0";
+    const allowanceNum = parseFloat(allowanceVal || "0");
+
+    const formattedBalance = isNaN(balanceNum) ? "0.00" : (balanceNum / 1000000).toFixed(2);
+    const formattedAllowance = isNaN(allowanceNum) ? "0.00" : (allowanceNum / 1000000).toFixed(2);
+
+    ctx.reply(`
+💰 *USDC Status*
+Balance: ${formattedBalance} USDC
+Allowance: ${formattedAllowance} USDC
+
+_Note: If balance is wrong, ensure you have USDC.e (Bridged USDC)._
+    `, { parse_mode: "Markdown" });
   } catch (e: any) {
     console.error(`[BOT] Balance Error: ${e.message}`);
     ctx.reply(`❌ Balance Error: ${e.message}`);
+  }
+});
+
+bot.command("approve", async (ctx) => {
+  if (!ctx.from) return;
+  console.log(`[BOT] User ${ctx.from.id} ran /approve`);
+  const user: any = db.getUser(ctx.from.id.toString());
+  if (!user) return ctx.reply("❌ Use /import first.");
+
+  try {
+    const poly = new PolyMarketAPI({
+      key: user.api_key,
+      secret: user.api_secret,
+      passphrase: user.api_passphrase
+    }, user.private_key);
+
+    ctx.reply("⏳ Sending Master Approvals (Standard + Neg Risk)... This may take a few seconds.");
+    const hashes = await poly.approveUSDC();
+    ctx.reply(`✅ Master Approval successful!\n\nTx 1: https://polygonscan.com/tx/${hashes[0]}\nTx 2: https://polygonscan.com/tx/${hashes[1]}\n\nYou can now check your status with /balance in a minute.`);
+  } catch (e: any) {
+    console.error(`[BOT] Approval Error: ${e.message}`);
+    ctx.reply(`❌ Approval Failed: ${e.message}`);
   }
 });
 
