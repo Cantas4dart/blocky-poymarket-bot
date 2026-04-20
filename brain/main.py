@@ -1,30 +1,40 @@
+"""
+Blocky Polymarket - Brain (Signal Engine)
+Runs on a loop, scanning weather markets and generating trade signals.
+"""
 import time
-from markets import get_weather_markets
-from weather import get_forecast
-from model import compute_probability
-from signals import save_signals
+import sys
+import os
 
-THRESHOLD = 0.1
+# Ensure we can import sibling modules when run directly
+sys.path.insert(0, os.path.dirname(__file__))
 
-while True:
-    signals = []
+from markets import MarketClient
+from weather import WeatherClient
+from model import TradingModel
+from signals import SignalGenerator
 
-    markets = get_weather_markets()
+SCAN_INTERVAL = 300  # 5 minutes
 
-    for m in markets:
-        temps = get_forecast(m["lat"], m["lon"])
-        prob = compute_probability(temps, m["target"])
+def main():
+    print("=" * 50)
+    print("  Blocky Brain - Calibrated Signal Engine v2")
+    print("=" * 50)
 
-        edge = prob - m["price"]
+    gen = SignalGenerator()
 
-        if edge > THRESHOLD:
-            signals.append({
-                "id": m["id"],
-                "market_id": m["id"],
-                "action": "BUY_YES",
-                "price": round(m["price"] + 0.01, 2),
-                "confidence": edge
-            })
+    while True:
+        try:
+            print(f"\n[BRAIN] Starting market scan...")
+            gen.run()
+            print(f"[BRAIN] Scan complete. Sleeping {SCAN_INTERVAL}s...")
+        except KeyboardInterrupt:
+            print("\n[BRAIN] Shutting down gracefully.")
+            break
+        except Exception as e:
+            print(f"[BRAIN ERROR] {e}")
 
-    save_signals(signals)
-    time.sleep(300)
+        time.sleep(SCAN_INTERVAL)
+
+if __name__ == "__main__":
+    main()
