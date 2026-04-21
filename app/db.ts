@@ -1,6 +1,6 @@
 import Database from "better-sqlite3";
 import * as path from "path";
-import { decryptSecret, encryptSecret, isEncryptedSecret } from "./secrets";
+import { decryptSecret, encryptSecret, hasMasterKey, isEncryptedSecret } from "./secrets";
 
 export interface User {
   id: number;
@@ -40,7 +40,7 @@ export class DBManager {
     const dbPath = path.join(__dirname, "../data/users.db");
     this.db = new Database(dbPath);
     this.init();
-    this.migratePlaintextSecrets();
+    this.maybeMigratePlaintextSecrets();
   }
 
   private init() {
@@ -104,6 +104,9 @@ export class DBManager {
   }
 
   saveUser(user: any) {
+    if (!hasMasterKey()) {
+      throw new Error("MASTER_ENCRYPTION_KEY is not configured.");
+    }
     const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO users (tg_id, private_key, api_key, api_secret, api_passphrase)
       VALUES (?, ?, ?, ?, ?)
@@ -121,6 +124,18 @@ export class DBManager {
     const user = this.db.prepare("SELECT * FROM users WHERE tg_id = ?").get(tgId) as User | undefined;
     if (!user) return undefined;
 
+    if (
+      (!hasMasterKey()) &&
+      (
+        isEncryptedSecret(user.private_key) ||
+        isEncryptedSecret(user.api_key) ||
+        isEncryptedSecret(user.api_secret) ||
+        isEncryptedSecret(user.api_passphrase)
+      )
+    ) {
+      throw new Error("MASTER_ENCRYPTION_KEY is required to unlock stored wallet credentials.");
+    }
+
     user.private_key = decryptSecret(user.private_key);
     user.api_key = decryptSecret(user.api_key);
     user.api_secret = decryptSecret(user.api_secret);
@@ -130,6 +145,18 @@ export class DBManager {
 
   getActiveUsers(): User[] {
     const users = this.db.prepare("SELECT * FROM users WHERE trading_active = 1").all() as User[];
+    if (
+      !hasMasterKey() &&
+      users.some((user) =>
+        isEncryptedSecret(user.private_key) ||
+        isEncryptedSecret(user.api_key) ||
+        isEncryptedSecret(user.api_secret) ||
+        isEncryptedSecret(user.api_passphrase)
+      )
+    ) {
+      throw new Error("MASTER_ENCRYPTION_KEY is required to unlock stored wallet credentials.");
+    }
+
     return users.map((user) => ({
       ...user,
       private_key: decryptSecret(user.private_key),
@@ -163,7 +190,15 @@ export class DBManager {
     this.db.prepare("DELETE FROM users WHERE tg_id = ?").run(tgId);
   }
 
-  migratePlaintextSecrets() {
+  maybeMigratePlaintextSecrets() {
+    if (!hasMasterKey()) {
+      const row = this.db.prepare("SELECT COUNT(*) as count FROM users").get() as { count: number };
+      if ((row?.count || 0) > 0) {
+        console.warn("[DB] MASTER_ENCRYPTION_KEY is not set. Existing wallet records will not be migrated or unlocked yet.");
+      }
+      return;
+    }
+
     const users = this.db.prepare(
       "SELECT id, private_key, api_key, api_secret, api_passphrase FROM users"
     ).all() as Array<{

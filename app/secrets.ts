@@ -5,6 +5,11 @@ dotenv.config();
 
 const ENC_PREFIX = "enc:v1";
 
+export function hasMasterKey(): boolean {
+  const raw = process.env.MASTER_ENCRYPTION_KEY || "";
+  return raw.length >= 16;
+}
+
 function getMasterKey(): Buffer {
   const raw = process.env.MASTER_ENCRYPTION_KEY || "";
   if (!raw || raw.length < 16) {

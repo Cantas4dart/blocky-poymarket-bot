@@ -23,6 +23,7 @@ class TradingModel:
     EXTREME_PROB_FLOOR = 0.03
     EXTREME_PROB_CEILING = 0.97
     EXTREME_SPREAD_MAX = 0.18
+    MIN_CONFIDENCE_SCORE = 0.80
 
     def __init__(self, risk_percent=0.01):
         self.risk_percent = risk_percent
@@ -115,6 +116,7 @@ class TradingModel:
         abs_edge = abs(edge)
         reasons = []
         mode = "extreme_mispricing" if abs_edge >= self.EXTREME_EDGE_THRESHOLD else "standard"
+        confidence_score = self._confidence_score(abs_edge, spread, mode)
 
         if mode == "standard":
             if model_prob < self.STANDARD_PROB_FLOOR:
@@ -153,8 +155,12 @@ class TradingModel:
                     f"Edge {abs_edge:.1%} below extreme minimum {self.EXTREME_EDGE_FLOOR:.0%}"
                 )
 
+        if confidence_score < self.MIN_CONFIDENCE_SCORE:
+            reasons.append(
+                f"Confidence {confidence_score:.2f} must be >= {self.MIN_CONFIDENCE_SCORE:.2f}"
+            )
+
         should_trade = len(reasons) == 0
-        confidence_score = self._confidence_score(abs_edge, spread, mode)
         size_multiplier = self._size_multiplier(confidence_score) if should_trade else 0.0
         action = "BUY_YES" if edge > 0 else "BUY_NO"
 

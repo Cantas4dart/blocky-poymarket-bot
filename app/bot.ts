@@ -421,7 +421,11 @@ bot.on("message:text", async (ctx) => {
       ctx.session.step = "";
     } catch (e: any) {
       console.error(`[BOT] Import Error for ${ctx.from.id}.`);
-      ctx.reply("Wallet import failed. Please verify the private key and try again.");
+      if (String(e?.message || "").includes("MASTER_ENCRYPTION_KEY")) {
+        ctx.reply("Wallet import is temporarily unavailable because MASTER_ENCRYPTION_KEY is not configured on the server.");
+      } else {
+        ctx.reply("Wallet import failed. Please verify the private key and try again.");
+      }
     }
   }
 });
