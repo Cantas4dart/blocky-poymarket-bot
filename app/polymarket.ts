@@ -11,6 +11,8 @@ export class PolyMarketAPI {
   private client: ClobClient | null = null;
   private readonly dataApiUrl = "https://data-api.polymarket.com";
   private privateKey?: string;
+  private readonly usdcAddress = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
+  private readonly conditionalTokensAddress = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
 
   constructor(creds: { key: string; secret: string; passphrase: string }, privateKey?: string) {
     this.privateKey = privateKey;
@@ -127,5 +129,40 @@ export class PolyMarketAPI {
     const url = `https://gamma-api.polymarket.com/markets?conditionId=${conditionId}`;
     const res = await axios.get(url);
     return res.data[0];
+  }
+
+  async redeemWinnings(conditionId: string) {
+    if (!this.privateKey) throw new Error("Private Key not found");
+
+    const formattedPK = this.privateKey.startsWith("0x")
+      ? (this.privateKey as `0x${string}`)
+      : (`0x${this.privateKey}` as `0x${string}`);
+
+    const account = privateKeyToAccount(formattedPK);
+    const walletClient = createWalletClient({
+      account,
+      chain: polygon,
+      transport: http()
+    });
+
+    const abi = parseAbi([
+      "function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] indexSets)"
+    ]);
+    const zeroBytes32 = `0x${"0".repeat(64)}` as `0x${string}`;
+
+    console.log(`[SETTLE] Redeeming winnings for condition ${conditionId}...`);
+    return walletClient.sendTransaction({
+      to: this.conditionalTokensAddress as `0x${string}`,
+      data: encodeFunctionData({
+        abi,
+        functionName: "redeemPositions",
+        args: [
+          this.usdcAddress as `0x${string}`,
+          zeroBytes32,
+          conditionId as `0x${string}`,
+          [1n, 2n]
+        ]
+      })
+    });
   }
 }

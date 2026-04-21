@@ -6,10 +6,12 @@ import { DBManager, User } from "./db";
 export class TradeExecutor {
   private db: DBManager;
   private signalPath: string;
+  private reservedCapitalByUser: Map<string, number>;
 
   constructor() {
     this.db = new DBManager();
     this.signalPath = path.join(__dirname, "../data/signals.json");
+    this.reservedCapitalByUser = new Map();
   }
 
   async runLoop() {
@@ -43,6 +45,7 @@ export class TradeExecutor {
 
     const activeUsers: User[] = this.db.getActiveUsers();
     console.log(`[EXEC] Found ${activeUsers.length} active traders.`);
+    this.reservedCapitalByUser.clear();
 
     for (const user of activeUsers) {
       const poly = new PolyMarketAPI({
@@ -50,14 +53,26 @@ export class TradeExecutor {
         secret: user.api_secret,
         passphrase: user.api_passphrase
       }, user.private_key);
+      let openPositionCount = this.db.getUnsettledTradeCount(user.tg_id);
 
       for (const signal of signals) {
+        if (openPositionCount >= user.max_open_positions) {
+          console.log(
+            `[EXEC] User ${user.tg_id} is at max open positions ` +
+            `(${openPositionCount}/${user.max_open_positions}). Skipping further signals.`
+          );
+          break;
+        }
+
         // 1. Check if user already traded this market
         if (this.db.hasTraded(user.tg_id, signal.market_id)) {
           continue;
         }
 
-        console.log(`[EXEC] New Signal for ${user.tg_id}: ${signal.question}`);
+        console.log(
+          `[EXEC] New Signal for ${user.tg_id}: ${signal.question} ` +
+          `| ${signal.action} | mode=${signal.mode || "standard"} | conf=${signal.confidence_score ?? "n/a"}`
+        );
 
         try {
           // 2. Size Calculation & Auto-Approval Check
@@ -68,8 +83,14 @@ export class TradeExecutor {
           const standardEx = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E";
           const allowanceVal = balanceData.allowances ? (balanceData as any).allowances[standardEx] : "0";
           const allowance = parseFloat(allowanceVal || "0") / 1000000;
+          const alreadyReserved = this.reservedCapitalByUser.get(user.tg_id) || 0;
+          const spendableBalance = Math.max(0, balance - alreadyReserved);
           
-          console.log(`[EXEC] User ${user.tg_id} - Balance: ${balance.toFixed(2)}, Allowance: ${allowance.toFixed(2)}`);
+          console.log(
+            `[EXEC] User ${user.tg_id} - Balance: ${balance.toFixed(2)}, ` +
+            `Reserved: ${alreadyReserved.toFixed(2)}, Spendable: ${spendableBalance.toFixed(2)}, ` +
+            `Allowance: ${allowance.toFixed(2)}`
+          );
 
           // Auto-Approve if balance exists but allowance is missing
           if (balance > 0.1 && allowance < 1.0) {
@@ -80,11 +101,15 @@ export class TradeExecutor {
             continue;
           }
 
-          // Size = min(Balance * Risk%, MaxTradeAmount) / Price
-          let targetUSD = balance * (user.risk_percent / 100);
+          // Confidence-weighted size = min(Balance * Risk%, MaxTradeAmount) * multiplier / entry price
+          let targetUSD = spendableBalance * (user.risk_percent / 100);
           if (targetUSD > user.max_trade_amount) targetUSD = user.max_trade_amount;
-          
-          const size = Math.floor(targetUSD / signal.market_price);
+          const sizeMultiplier = Math.max(0.25, Number(signal.size_multiplier || 1));
+          targetUSD *= sizeMultiplier;
+
+          const entryPrice = Number(signal.entry_price || signal.market_price);
+          const size = Math.floor(targetUSD / entryPrice);
+          const reservedCost = size * entryPrice;
           
           if (size < 1) {
             console.log(`[EXEC] Balance too low to place trade for ${user.tg_id}`);
@@ -98,16 +123,19 @@ export class TradeExecutor {
           const tokenId = signal.action === "BUY_YES" ? clobTokenIds[0] : clobTokenIds[1];
 
           // 4. Place Order
-          await poly.placeLimitOrder(tokenId, "BUY", signal.market_price, size);
+          await poly.placeLimitOrder(tokenId, "BUY", entryPrice, size);
 
           // 5. Save trade to tracking DB
           this.db.saveTrade({
             market_id: signal.market_id,
+            condition_id: signal.condition_id,
             tg_id: user.tg_id,
             side: signal.action.split("_")[1], // YES or NO
-            buy_price: signal.market_price,
+            buy_price: entryPrice,
             size: size
           });
+          this.reservedCapitalByUser.set(user.tg_id, alreadyReserved + reservedCost);
+          openPositionCount += 1;
 
           console.log(`[EXEC] Trade successfully executed and saved for ${user.tg_id}`);
 

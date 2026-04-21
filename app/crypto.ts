@@ -27,11 +27,10 @@ export class CryptoManager {
     const client = new ClobClient(host, chainId, walletClient as any);
     
     try {
-      console.log(`Deriving API keys for address: ${account.address}`);
       const creds = await client.createOrDeriveApiKey();
       return creds;
     } catch (error) {
-      console.error("Error deriving API keys:", error);
+      console.error("Error deriving API keys.");
       throw error;
     }
   }

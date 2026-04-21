@@ -1,5 +1,4 @@
 import requests
-from datetime import datetime
 import os
 from dotenv import load_dotenv
 
@@ -33,9 +32,10 @@ class WeatherClient:
                 "longitude": lon,
                 "hourly": "temperature_2m",
                 "models": "ecmwf_ifs025,gfs_seamless", # Requesting both major models
-                "forecast_days": 7
+                "forecast_days": 7,
+                "timezone": "auto"
             }
-            res = requests.get(url, params=params)
+            res = requests.get(url, params=params, timeout=20)
             res.raise_for_status()
             return res.json()["hourly"]
         except Exception as e:

@@ -4,7 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "start": "concurrently \"python brain/signals.py\" \"npx ts-node app/bot.ts\" \"npx ts-node app/executor.ts\" \"npx ts-node app/settlement.ts\""
+    "start": "concurrently \"python -u brain/main.py\" \"ts-node -T app/bot.ts\" \"ts-node -T app/executor.ts\" \"ts-node -T app/settlement.ts\"",
+    "typecheck": "node ./node_modules/typescript/lib/tsc.js --noEmit"
   },
   "keywords": [],
   "author": "",
