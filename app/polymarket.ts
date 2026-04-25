@@ -1,21 +1,54 @@
-import { ClobClient, AssetType, Side, UserOrder } from "@polymarket/clob-client";
-import { createWalletClient, http, encodeFunctionData, parseAbi } from "viem";
+import { ApiError, ClobClient, AssetType, OpenOrdersResponse, OrderType, Side, UserMarketOrder, UserOrder } from "@polymarket/clob-client";
+import { createPublicClient, createWalletClient, http, encodeFunctionData, parseAbi, parseUnits } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { polygon } from "viem/chains";
 import axios from "axios";
 import * as dotenv from "dotenv";
+import { RelayClient, RelayerTxType } from "@polymarket/builder-relayer-client";
+import { BuilderConfig } from "@polymarket/builder-signing-sdk";
 
 dotenv.config();
+
+function getPolygonRpcCandidates() {
+  const configured = (process.env.POLYGON_RPC_URL || "").trim();
+  const extraConfigured = (process.env.POLYGON_RPC_URLS || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const candidates = [
+    configured,
+    ...extraConfigured,
+    "https://polygon.drpc.org",
+    "https://tenderly.rpc.polygon.community",
+    "https://polygon.publicnode.com",
+  ].filter(Boolean);
+
+  const seen = new Set<string>();
+  return candidates.filter((url) => {
+    const key = url.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
 
 export class PolyMarketAPI {
   private client: ClobClient | null = null;
   private readonly dataApiUrl = "https://data-api.polymarket.com";
+  private readonly marketLookupCache = new Map<string, string>();
   private privateKey?: string;
+  private funderAddress?: string;
+  private signatureType?: number;
   private readonly usdcAddress = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
   private readonly conditionalTokensAddress = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
-
-  constructor(creds: { key: string; secret: string; passphrase: string }, privateKey?: string) {
+  constructor(
+    creds: { key: string; secret: string; passphrase: string },
+    privateKey?: string,
+    options?: { funderAddress?: string | null; signatureType?: number | null }
+  ) {
     this.privateKey = privateKey;
+    this.funderAddress = options?.funderAddress || undefined;
+    this.signatureType = options?.signatureType ?? undefined;
     this.initClient(creds, privateKey);
   }
 
@@ -34,7 +67,90 @@ export class PolyMarketAPI {
       });
     }
 
-    this.client = new ClobClient(host, chainId, signer as any, creds);
+    this.client = new ClobClient(
+      host,
+      chainId,
+      signer as any,
+      creds,
+      this.signatureType as any,
+      this.funderAddress,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true
+    );
+  }
+
+  private getSignerWalletClient() {
+    if (!this.privateKey) throw new Error("Private Key not found");
+
+    const formattedPK = this.privateKey.startsWith("0x")
+      ? (this.privateKey as `0x${string}`)
+      : (`0x${this.privateKey}` as `0x${string}`);
+    const account = privateKeyToAccount(formattedPK);
+    const walletClient = createWalletClient({
+      account,
+      chain: polygon,
+      transport: http(getPolygonRpcCandidates()[0]),
+    });
+
+    return { account, walletClient };
+  }
+
+  getSignerAddress() {
+    const { account } = this.getSignerWalletClient();
+    return account.address;
+  }
+
+  getConfiguredFunderAddress() {
+    return this.funderAddress || this.getSignerAddress();
+  }
+
+  async getWalletUsdcBalance(address: string) {
+    const abi = parseAbi(["function balanceOf(address owner) view returns (uint256)"]);
+    let lastError: any = null;
+
+    for (const rpcUrl of getPolygonRpcCandidates()) {
+      try {
+        const publicClient = createPublicClient({
+          chain: polygon,
+          transport: http(rpcUrl),
+        });
+
+        return await publicClient.readContract({
+          address: this.usdcAddress as `0x${string}`,
+          abi,
+          functionName: "balanceOf",
+          args: [address as `0x${string}`],
+        });
+      } catch (e: any) {
+        lastError = e;
+        console.warn(`[POLY] RPC read failed on ${rpcUrl}: ${e.message}`);
+      }
+    }
+
+    throw lastError || new Error("All Polygon RPC endpoints failed.");
+  }
+
+  private getRelayerClient() {
+    const key = (process.env.POLY_BUILDER_API_KEY || "").trim();
+    const secret = (process.env.POLY_BUILDER_SECRET || "").trim();
+    const passphrase = (process.env.POLY_BUILDER_PASSPHRASE || "").trim();
+    if (!key || !secret || !passphrase) {
+      return null;
+    }
+
+    const { walletClient } = this.getSignerWalletClient();
+    const builderConfig = new BuilderConfig({
+      localBuilderCreds: { key, secret, passphrase },
+    });
+    const txType = this.signatureType === 1 ? RelayerTxType.PROXY : RelayerTxType.SAFE;
+    const relayerUrl = (process.env.POLY_RELAYER_URL || "https://relayer-v2.polymarket.com/").trim();
+
+    return new RelayClient(relayerUrl, 137, walletClient as any, builderConfig as any, txType);
   }
 
   async getBalance(retries = 3) {
@@ -42,6 +158,9 @@ export class PolyMarketAPI {
     
     for (let i = 0; i < retries; i++) {
         try {
+            await this.client.updateBalanceAllowance({
+                asset_type: AssetType.COLLATERAL,
+            });
             return await this.client.getBalanceAllowance({
                 asset_type: AssetType.COLLATERAL,
             });
@@ -55,46 +174,99 @@ export class PolyMarketAPI {
   }
 
   async approveUSDC() {
-    if (!this.privateKey) throw new Error("Private Key not found");
-    
-    const formattedPK = this.privateKey.startsWith("0x") ? (this.privateKey as `0x${string}`) : (`0x${this.privateKey}` as `0x${string}`);
-    const account = privateKeyToAccount(formattedPK);
-    
-    const USDCE_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
-    
-    // BOTH main Polymarket spenders
-    const SPENDERS = [
-        "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E", // Exchange
-        "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"  // Neg Risk Adapter (Common for Weather)
+    const spenders = [
+      "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045", // CTF
+      "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E", // Exchange
+      "0xC5d563A36AE78145C45a50134d48A1215220f80a", // Neg Risk CTF Exchange
+      "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296", // Legacy/adapter path seen in current bot
     ];
-    
-    const walletClient = createWalletClient({
-      account,
-      chain: polygon,
-      transport: http()
-    });
-
     const abi = parseAbi(["function approve(address spender, uint256 amount) public returns (bool)"]);
     const infinite = BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 
-    console.log(`[EXEC] Sending Master Approvals for ${account.address}...`);
-    
-    const hashes = [];
-    for (const spender of SPENDERS) {
-        const hash = await walletClient.sendTransaction({
-            to: USDCE_ADDRESS,
-            data: encodeFunctionData({
-                abi,
-                functionName: "approve",
-                args: [spender as `0x${string}`, infinite]
-            })
-        });
-        hashes.push(hash);
-        // Small delay between transactions
-        await new Promise(res => setTimeout(res, 1000));
+    if (this.signatureType && this.signatureType !== 0 && this.funderAddress) {
+      const relayer = this.getRelayerClient();
+      if (!relayer) {
+        throw new Error(
+          "Proxy wallet approval needs relayer credentials. Set POLY_BUILDER_API_KEY, POLY_BUILDER_SECRET, and POLY_BUILDER_PASSPHRASE."
+        );
+      }
+
+      if (this.signatureType === 2) {
+        const deployed = await relayer.getDeployed(this.funderAddress);
+        if (!deployed) {
+          console.log(`[EXEC] Deploying safe for funder ${this.funderAddress} via relayer...`);
+          const deployment = await relayer.deploy();
+          const deploymentResult = await deployment.wait();
+          if (!deploymentResult) {
+            throw new Error("Safe deployment failed through relayer.");
+          }
+        }
+      }
+
+      const txs = spenders.map((spender) => ({
+        to: this.usdcAddress,
+        data: encodeFunctionData({
+          abi,
+          functionName: "approve",
+          args: [spender as `0x${string}`, infinite],
+        }),
+        value: "0",
+      }));
+
+      console.log(`[EXEC] Sending gasless approvals for funder ${this.funderAddress}...`);
+      const response = await relayer.execute(txs, "Approve Polymarket spenders");
+      const result = await response.wait();
+      if (!result?.transactionHash) {
+        throw new Error("Gasless approval did not confirm.");
+      }
+      return [result.transactionHash];
     }
-    
+
+    const { account, walletClient } = this.getSignerWalletClient();
+    console.log(`[EXEC] Sending direct approvals for ${account.address}...`);
+
+    const hashes = [];
+    for (const spender of spenders) {
+      const hash = await walletClient.sendTransaction({
+        to: this.usdcAddress as `0x${string}`,
+        data: encodeFunctionData({
+          abi,
+          functionName: "approve",
+          args: [spender as `0x${string}`, infinite],
+        }),
+      });
+      hashes.push(hash);
+      await new Promise((res) => setTimeout(res, 1000));
+    }
+
     return hashes;
+  }
+
+  async transferUsdcToFunder(amount: number) {
+    if (!this.funderAddress) {
+      throw new Error("No funder address is configured for this user.");
+    }
+
+    const signerAddress = this.getSignerAddress();
+    if (signerAddress.toLowerCase() === this.funderAddress.toLowerCase()) {
+      throw new Error("Signer wallet and funder wallet are already the same address.");
+    }
+    if (!(amount > 0)) {
+      throw new Error("Amount must be greater than zero.");
+    }
+
+    const { walletClient } = this.getSignerWalletClient();
+    const abi = parseAbi(["function transfer(address to, uint256 amount) returns (bool)"]);
+    const amountUnits = parseUnits(String(amount), 6);
+
+    return walletClient.sendTransaction({
+      to: this.usdcAddress as `0x${string}`,
+      data: encodeFunctionData({
+        abi,
+        functionName: "transfer",
+        args: [this.funderAddress as `0x${string}`, amountUnits],
+      }),
+    });
   }
 
   async getPositions(userAddress: string) {
@@ -103,12 +275,47 @@ export class PolyMarketAPI {
     return response.data;
   }
 
+  async getPositionLabel(tokenId: string) {
+    const cached = this.marketLookupCache.get(tokenId);
+    if (cached) return cached;
+
+    try {
+      const marketByTokenUrl = `https://clob.polymarket.com/markets-by-token/${tokenId}`;
+      const marketByTokenRes = await axios.get(marketByTokenUrl);
+      const marketByToken = marketByTokenRes.data;
+      const market = await this.getMarketByConditionId(marketByToken.condition_id);
+
+      const outcome =
+        tokenId === String(marketByToken.primary_token_id) ? "YES"
+        : tokenId === String(marketByToken.secondary_token_id) ? "NO"
+        : "POSITION";
+      const question = market?.question || market?.title || market?.slug || tokenId;
+      const label = `${question} [${outcome}]`;
+
+      this.marketLookupCache.set(tokenId, label);
+      return label;
+    } catch (e: any) {
+      console.warn(`[POLY] Failed to resolve token label for ${tokenId}: ${e.message}`);
+      this.marketLookupCache.set(tokenId, tokenId);
+      return tokenId;
+    }
+  }
+
+  async getOpenOrders(): Promise<OpenOrdersResponse> {
+    if (!this.client) throw new Error("Client not initialized");
+    return this.client.getOpenOrders();
+  }
+
   async placeLimitOrder(tokenID: string, side: "BUY" | "SELL", price: number, size: number) {
     if (!this.client) throw new Error("Client not initialized");
     
     console.log(`[EXEC] Placing ${side} order for ${tokenID}: ${size} shares @ ${price}`);
     
     try {
+      const book: any = await this.client.getOrderBook(tokenID);
+      const tick = String(book?.tick_size || await this.client.getTickSize(tokenID));
+      const negRisk = typeof book?.neg_risk === "boolean" ? book.neg_risk : await this.client.getNegRisk(tokenID);
+
       const order: UserOrder = {
         tokenID: tokenID,
         price: price,
@@ -116,19 +323,88 @@ export class PolyMarketAPI {
         side: side === "BUY" ? Side.BUY : Side.SELL,
       };
       
-      const res = await this.client.createOrder(order);
-      console.log(`[EXEC] Order Placed Successfully: ${res.orderID}`);
+      const res = await this.client.createAndPostOrder(
+        order,
+        { tickSize: tick as any, negRisk },
+        OrderType.GTC
+      );
+
+      if (!res?.success || !res?.orderID) {
+        const details = res?.errorMsg || res?.error || res?.status || JSON.stringify(res);
+        throw new Error(`Order was not accepted by Polymarket: ${details}`);
+      }
+
+      console.log(`[EXEC] Order Submitted Successfully: ${res.orderID} (${res.status || "unknown"})`);
       return res;
     } catch (e: any) {
-      console.error(`[EXEC] Order Failed: ${e.message}`);
+      if (e instanceof ApiError) {
+        const details = typeof e.data === "object" ? JSON.stringify(e.data) : String(e.data || "");
+        console.error(`[EXEC] Order Failed: ${e.message}${details ? ` | details=${details}` : ""}`);
+      } else {
+        console.error(`[EXEC] Order Failed: ${e.message}`);
+      }
       throw e;
     }
   }
 
-  async getMarket(conditionId: string) {
+  async placeMarketOrder(tokenID: string, side: "BUY" | "SELL", amount: number) {
+    if (!this.client) throw new Error("Client not initialized");
+
+    console.log(`[EXEC] Placing ${side} market order for ${tokenID}: amount=${amount}`);
+
+    try {
+      const book: any = await this.client.getOrderBook(tokenID);
+      const tick = String(book?.tick_size || await this.client.getTickSize(tokenID));
+      const negRisk = typeof book?.neg_risk === "boolean" ? book.neg_risk : await this.client.getNegRisk(tokenID);
+
+      const order: UserMarketOrder = {
+        tokenID,
+        amount,
+        side: side === "BUY" ? Side.BUY : Side.SELL,
+      };
+
+      const res = await this.client.createAndPostMarketOrder(
+        order,
+        { tickSize: tick as any, negRisk },
+        OrderType.FAK
+      );
+
+      if (!res?.success || !res?.orderID) {
+        const details = res?.errorMsg || res?.error || res?.status || JSON.stringify(res);
+        throw new Error(`Market order was not accepted by Polymarket: ${details}`);
+      }
+
+      console.log(`[EXEC] Market Order Submitted Successfully: ${res.orderID} (${res.status || "unknown"})`);
+      return res;
+    } catch (e: any) {
+      if (e instanceof ApiError) {
+        const details = typeof e.data === "object" ? JSON.stringify(e.data) : String(e.data || "");
+        console.error(`[EXEC] Market Order Failed: ${e.message}${details ? ` | details=${details}` : ""}`);
+      } else {
+        console.error(`[EXEC] Market Order Failed: ${e.message}`);
+      }
+      throw e;
+    }
+  }
+
+  async getMarketByConditionId(conditionId: string) {
     const url = `https://gamma-api.polymarket.com/markets?conditionId=${conditionId}`;
     const res = await axios.get(url);
     return res.data[0];
+  }
+
+  async getMarketById(marketId: string) {
+    const url = `https://gamma-api.polymarket.com/markets/${marketId}`;
+    const res = await axios.get(url);
+    return res.data;
+  }
+
+  async getPublicProfileByWallet(address: string) {
+    const url = "https://gamma-api.polymarket.com/public-profile";
+    const res = await axios.get(url, {
+      params: { address },
+    });
+    return res.data;
   }
 
   async redeemWinnings(conditionId: string) {

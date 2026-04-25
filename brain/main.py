@@ -10,11 +10,16 @@ import os
 sys.path.insert(0, os.path.dirname(__file__))
 
 from signals import SignalGenerator
+from singleton import acquire_process_lock
 
 SCAN_INTERVAL = 300  # 5 minutes
 
 
 def main():
+    release_lock = acquire_process_lock("signal-brain")
+    if not release_lock:
+        return
+
     print("=" * 50)
     print("  Blocky Brain - Calibrated Signal Engine v2")
     print("=" * 50)

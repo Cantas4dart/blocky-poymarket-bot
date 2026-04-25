@@ -63,6 +63,7 @@ class SignalGenerator:
             return
 
         signals = []
+        market_states = []
         skipped = {
             "no_location": 0,
             "no_market_date": 0,
@@ -156,7 +157,7 @@ class SignalGenerator:
                     # Step 6: Calculate ensemble probability
                     avg_prob, spread, ensemble_stats = self.model.calculate_ensemble_probability(forecast_data, target)
                     self.log(
-                        f"[SIGNAL] | Model Prob: {avg_prob:.2%}, Spread: {spread:.2%}, "
+                        f"[SIGNAL] | Raw Model Prob: {avg_prob:.2%}, Spread: {spread:.2%}, "
                         f"Models: {ensemble_stats.get('count', 0)}"
                     )
 
@@ -184,12 +185,49 @@ class SignalGenerator:
                         f"Market Price (No): {sanity['no_price']:.4f}"
                     )
 
-                    # Step 8: Calculate edge
-                    edge = self.model.get_edge(avg_prob, market_price)
-                    self.log(f"[SIGNAL] | Edge: {edge:.2%} (abs: {abs(edge):.2%})")
+                    days_to_resolution = max((market_date - datetime.utcnow().date()).days, 0)
+                    decision = self.model.evaluate_market_opportunity(
+                        model_prob=avg_prob,
+                        spread=spread,
+                        market_price=market_price,
+                        market_context={
+                            "days_to_resolution": days_to_resolution,
+                            "market_date": market_date.isoformat(),
+                            "target": target,
+                        }
+                    )
+                    self.log(
+                        f"[SIGNAL] | Adjusted Prob: {decision['adjusted_model_prob']:.2%}, "
+                        f"Bust Risk: {decision['bust_risk']:.2%}, Regime: {decision['regime']}"
+                    )
+                    self.log(f"[SIGNAL] | Edge: {decision['edge']:.2%} (abs: {decision['abs_edge']:.2%})")
 
-                    # Step 9: Should we trade?
-                    decision = self.model.evaluate_trade(edge, avg_prob, spread)
+                    trade_side_price = sanity["yes_price"] if decision["action"] == "BUY_YES" else sanity["no_price"]
+                    trade_side_market_prob = decision["adjusted_model_prob"] if decision["action"] == "BUY_YES" else (1 - decision["adjusted_model_prob"])
+                    market_states.append({
+                        "market_id": market_id,
+                        "condition_id": condition_id,
+                        "question": question,
+                        "market_date": market_date.isoformat(),
+                        "raw_model_prob": round(avg_prob, 4),
+                        "adjusted_model_prob": round(decision["adjusted_model_prob"], 4),
+                        "market_price_yes": round(sanity["yes_price"], 4),
+                        "market_price_no": round(sanity["no_price"], 4),
+                        "trade_side_market_price": round(trade_side_price, 4),
+                        "trade_side_model_prob": round(trade_side_market_prob, 4),
+                        "ensemble_spread": round(spread, 4),
+                        "confidence_score": round(decision["confidence_score"], 4),
+                        "regime": decision["regime"],
+                        "bust_risk": round(decision["bust_risk"], 4),
+                        "spread_limit": round(decision["spread_limit"], 4),
+                        "required_edge": round(decision["required_edge"], 4),
+                        "action": decision["action"],
+                        "should_trade": decision["should_trade"],
+                        "days_to_resolution": days_to_resolution,
+                        "market_snapshot": sanity["snapshot"],
+                        "timestamp": str(datetime.now()),
+                    })
+
                     if decision["should_trade"]:
                         action = decision["action"]
                         entry_price = sanity["yes_price"] if action == "BUY_YES" else sanity["no_price"]
@@ -205,18 +243,23 @@ class SignalGenerator:
                             "target": target,
                             "forecast_data": {k: round(v, 2) for k, v in forecast_data.items()},
                             "avg_model_prob": round(avg_prob, 4),
+                            "adjusted_model_prob": round(decision["adjusted_model_prob"], 4),
                             "market_price_yes": round(sanity["yes_price"], 4),
                             "market_price_no": round(sanity["no_price"], 4),
                             "market_price": round(market_price, 4),
                             "entry_price": round(entry_price, 4),
-                            "edge": round(edge, 4),
-                            "abs_edge": round(abs(edge), 4),
+                            "edge": round(decision["edge"], 4),
+                            "abs_edge": round(decision["abs_edge"], 4),
                             "action": action,
                             "mode": decision["mode"],
                             "ensemble_spread": round(spread, 4),
                             "confidence_score": round(decision["confidence_score"], 4),
                             "size_multiplier": round(decision["size_multiplier"], 4),
-                            "conviction": spread <= self.model.STANDARD_SPREAD_MAX,
+                            "conviction": spread <= decision["spread_limit"],
+                            "regime": decision["regime"],
+                            "bust_risk": round(decision["bust_risk"], 4),
+                            "days_to_resolution": days_to_resolution,
+                            "required_edge": round(decision["required_edge"], 4),
                             "market_snapshot": sanity["snapshot"],
                             "timestamp": str(datetime.now())
                         })
@@ -250,7 +293,7 @@ class SignalGenerator:
             "markets_found": len(active_markets),
             "skipped": skipped,
             "elapsed_seconds": round(elapsed, 1),
-        })
+        }, market_states=market_states)
 
     def _skip_reason(self, decision):
         """Human-readable reason for skipping a trade."""
@@ -592,7 +635,7 @@ class SignalGenerator:
 
         return None
 
-    def save_signals(self, signals, diagnostics=None):
+    def save_signals(self, signals, diagnostics=None, market_states=None):
         os.makedirs(os.path.dirname(self.data_path), exist_ok=True)
         output = {
             "last_run": str(datetime.now()),
@@ -600,6 +643,8 @@ class SignalGenerator:
             "signal_count": len(signals),
             "signals": signals,
         }
+        if market_states is not None:
+            output["market_states"] = market_states
         if diagnostics:
             output["diagnostics"] = diagnostics
         with open(self.data_path, 'w') as f:

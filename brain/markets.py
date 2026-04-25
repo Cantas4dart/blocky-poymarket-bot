@@ -42,6 +42,13 @@ class MarketClient:
             "weather",
             "climate",
         ]
+        self.blocked_country_codes = {
+            "DZ", "AO", "BJ", "BW", "BF", "BI", "CM", "CV", "CF", "TD", "KM", "CD", "CG",
+            "CI", "DJ", "EG", "GQ", "ER", "SZ", "ET", "GA", "GM", "GH", "GN", "GW", "KE",
+            "LS", "LR", "LY", "MG", "MW", "ML", "MR", "MU", "YT", "MA", "MZ", "NA", "NE",
+            "NG", "RE", "RW", "SH", "ST", "SN", "SC", "SL", "SO", "ZA", "SS", "SD", "TZ",
+            "TG", "TN", "UG", "EH", "ZM", "ZW",
+        }
 
     def _build_session(self):
         session = requests.Session()
@@ -411,9 +418,19 @@ class MarketClient:
             "Munich": (48.1351, 11.5820, False),
         }
 
+        blocked_locations = {
+            "Cairo",
+            "Lagos",
+            "Nairobi",
+            "Johannesburg",
+        }
+
         # Check hardcoded locations first
         for loc, coords in locations.items():
             if loc.lower() in market_description.lower():
+                if loc in blocked_locations:
+                    print(f"[MARKETS]   [SKIP] Blocked African city market: '{loc}'")
+                    return None
                 return coords
 
         # --- Step 2: Dynamic geocoding fallback ---
@@ -502,6 +519,9 @@ class MarketClient:
             lon = top["longitude"]
             country = top.get("country_code", "").upper()
             is_us = (country == "US")
+            if country in self.blocked_country_codes:
+                print(f"[MARKETS]   [SKIP] Blocked African city market: '{city_name}' in country_code={country}")
+                return None
 
             print(f"[MARKETS]   [GEOCODE] Resolved '{city_name}' -> ({lat}, {lon}), "
                   f"country={top.get('country', '?')}, is_us={is_us}")

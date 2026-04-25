@@ -12,6 +12,8 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@polymarket/builder-relayer-client": "^0.0.8",
+    "@polymarket/builder-signing-sdk": "^1.0.0",
     "@polymarket/clob-client": "^5.8.1",
     "axios": "^1.15.0",
     "better-sqlite3": "^12.9.0",

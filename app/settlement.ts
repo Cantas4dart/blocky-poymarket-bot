@@ -4,6 +4,7 @@ import { Bot } from "grammy";
 import * as dotenv from "dotenv";
 import * as fs from "fs";
 import * as path from "path";
+import { acquireProcessLock } from "./singleton";
 
 dotenv.config();
 
@@ -84,7 +85,9 @@ export class SettlementMonitor {
     for (const trade of unsettled) {
       try {
         const poly = new PolyMarketAPI({ key: "", secret: "", passphrase: "" });
-        const market = await poly.getMarket(trade.condition_id || trade.market_id);
+        const market = trade.condition_id
+          ? await poly.getMarketByConditionId(trade.condition_id)
+          : await poly.getMarketById(trade.market_id);
 
         if (!market || !market.closed) {
           continue;
@@ -157,7 +160,12 @@ Use /daily for today's summary.
         key: user.api_key,
         secret: user.api_secret,
         passphrase: user.api_passphrase
-      }, user.private_key);
+      }, user.private_key, {
+        funderAddress: user.funder_address || (process.env.POLY_FUNDER_ADDRESS || "").trim() || null,
+        signatureType: Number.isInteger(user.signature_type)
+          ? user.signature_type
+          : ((process.env.POLY_SIGNATURE_TYPE || "").trim() ? Number.parseInt(process.env.POLY_SIGNATURE_TYPE || "", 10) : null),
+      });
 
       const txHash = await poly.redeemWinnings(trade.condition_id);
       this.db.markClaimedByCondition(trade.tg_id, trade.condition_id, txHash);
@@ -224,6 +232,10 @@ _Automated daily report from Blocky_
 }
 
 if (require.main === module) {
+  const releaseLock = acquireProcessLock("settlement-monitor");
+  if (!releaseLock) {
+    process.exit(0);
+  }
   const monitor = new SettlementMonitor();
   monitor.runLoop();
 }

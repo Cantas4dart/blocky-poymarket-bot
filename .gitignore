@@ -16,8 +16,10 @@ package-lock.json
 
 # Data & Databases (CRITICAL)
 data/*.db
+data/*.db-journal
 data/*.sqlite
 data/*.json
+data/locks/
 !data/README.md
 
 # Python
