@@ -462,6 +462,25 @@ class ProxyApprovalMigrationTests(unittest.TestCase):
 
 
 class ClobV2CompatibilityTests(unittest.TestCase):
+    def test_v2_balance_allows_no_arg_client(self):
+        poly = PolyMarketAPI.__new__(PolyMarketAPI)
+
+        class NoArgBalanceClient:
+            def get_balance_allowance(self, *args):
+                if args:
+                    raise TypeError("unexpected collateral argument")
+                return {"balance": "1000000", "allowance": "1000000"}
+
+        poly.client = NoArgBalanceClient()
+        original_flag = polymarket_module.V2_CLOB_CLIENT
+        try:
+            polymarket_module.V2_CLOB_CLIENT = True
+            result = poly.get_balance()
+        finally:
+            polymarket_module.V2_CLOB_CLIENT = original_flag
+
+        self.assertEqual(result["balance"], "1000000")
+
     def test_v2_limit_orders_use_gtc_submission(self):
         poly = PolyMarketAPI.__new__(PolyMarketAPI)
         poly.client = SimpleNamespace(
