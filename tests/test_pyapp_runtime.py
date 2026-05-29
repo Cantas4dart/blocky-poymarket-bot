@@ -1,4 +1,5 @@
 import io
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -11,6 +12,7 @@ from pyapp.executor import TradeExecutor
 from pyapp.main import _spawn, run_selected
 from pyapp.polymarket import PolyMarketAPI, extract_allowance_amount
 import pyapp.polymarket as polymarket_module
+import pyapp.relayer as relayer_module
 from pyapp.relayer import RelayClient
 from pyapp.settlement import SettlementMonitor
 
@@ -516,7 +518,7 @@ class ClobV2CompatibilityTests(unittest.TestCase):
         original_flag = polymarket_module.V2_CLOB_CLIENT
         try:
             polymarket_module.V2_CLOB_CLIENT = False
-            with self.assertRaisesRegex(RuntimeError, "py-clob-client-v2"):
+            with self.assertRaisesRegex(RuntimeError, "py-clob-client build with order helpers"):
                 poly.place_limit_order("token-1", "BUY", 0.3, 4)
         finally:
             polymarket_module.V2_CLOB_CLIENT = original_flag
@@ -558,6 +560,35 @@ class RelayClientHeaderTests(unittest.TestCase):
         self.assertEqual(headers["RELAYER_API_KEY"], "rk")
         self.assertEqual(headers["RELAYER_API_KEY_ADDRESS"], "0x0000000000000000000000000000000000000009")
         self.assertEqual(headers["Content-Type"], "application/json")
+
+    def test_relayer_api_key_auth_does_not_need_builder_sdk(self):
+        with patch.dict(
+            os.environ,
+            {
+                "RELAYER_API_KEY": "rk",
+                "RELAYER_API_KEY_ADDRESS": "0x0000000000000000000000000000000000000009",
+            },
+            clear=True,
+        ):
+            self.assertIsNone(relayer_module.build_builder_config_from_env())
+
+    def test_missing_builder_sdk_has_actionable_error(self):
+        original_creds = relayer_module.BuilderApiKeyCreds
+        try:
+            relayer_module.BuilderApiKeyCreds = None
+            with patch.dict(
+                os.environ,
+                {
+                    "POLY_BUILDER_API_KEY": "k",
+                    "POLY_BUILDER_SECRET": "s",
+                    "POLY_BUILDER_PASSPHRASE": "p",
+                },
+                clear=True,
+            ):
+                with self.assertRaisesRegex(ValueError, "py-builder-signing-sdk"):
+                    relayer_module.build_builder_config_from_env()
+        finally:
+            relayer_module.BuilderApiKeyCreds = original_creds
 
 
 class BalanceAllowanceParsingTests(unittest.TestCase):
